@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IdentityModel.Tokens.Jwt;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -22,6 +23,7 @@ using Microsoft.Azure.WebJobs.Script.ExtensionBundle;
 using Microsoft.Azure.WebJobs.Script.Grpc;
 using Microsoft.Azure.WebJobs.Script.Models;
 using Microsoft.Azure.WebJobs.Script.WebHost;
+using Microsoft.Azure.WebJobs.Script.WebHost.Authentication;
 using Microsoft.Azure.WebJobs.Script.WebHost.DependencyInjection;
 using Microsoft.Azure.WebJobs.Script.WebHost.Middleware;
 using Microsoft.Azure.WebJobs.Script.WebHost.Models;
@@ -35,6 +37,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using Microsoft.Net.Http.Headers;
 using Microsoft.WebJobs.Script.Tests;
 using Newtonsoft.Json.Linq;
@@ -189,7 +192,9 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
 
         public ScriptJobHostOptions ScriptOptions => JobHostServices.GetService<IOptions<ScriptJobHostOptions>>().Value;
 
-        public ISecretManager SecretManager => _testServer.Host.Services.GetService<ISecretManagerProvider>().Current;
+        public ISecretManagerProvider SecretManagerProvider => _testServer.Host.Services.GetService<ISecretManagerProvider>();
+
+        public ISecretManager SecretManager => SecretManagerProvider.Current;
 
         public string LogPath => _hostOptions.LogPath;
 
@@ -199,6 +204,11 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
 
         public async Task<string> GetMasterKeyAsync()
         {
+            if (!SecretManagerProvider.SecretsEnabled)
+            {
+                return null;
+            }
+
             HostSecretsInfo secrets = await SecretManager.GetHostSecretsAsync();
             return secrets.MasterKey;
         }
@@ -352,28 +362,42 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
 
         public async Task<HostStatus> GetHostStatusAsync()
         {
-            var secretManagerProvider = _testServer.Host.Services.GetService<ISecretManagerProvider>();
-            string uri = "admin/host/status";
-            if (secretManagerProvider != null && secretManagerProvider.SecretsEnabled)
-            {
-                HostSecretsInfo secrets = await SecretManager.GetHostSecretsAsync();
-                uri = uri + $"?code={secrets.MasterKey}";
+            HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, "admin/host/status");
 
+            if (SecretManagerProvider.SecretsEnabled)
+            {
+                // use admin key
+                HostSecretsInfo secrets = await SecretManager.GetHostSecretsAsync();
+                request.Headers.Add(AuthenticationLevelHandler.FunctionsKeyHeaderName, secrets.MasterKey);
             }
             else
             {
-                // use bearer token auth
-                var key = Util.GetDefaultKeyValue();
-                var issuer = string.Format(ScriptConstants.AdminJwtValidIssuerFormat, ScriptSettingsManager.Instance.GetSetting(EnvironmentSettingNames.AzureWebsiteName));
-                var audience = string.Format(ScriptConstants.AdminJwtValidAudienceFormat, ScriptSettingsManager.Instance.GetSetting(EnvironmentSettingNames.AzureWebsiteName));
-                var token = JwtGenerator.GenerateToken(issuer, audience, key: key);
-
-                HttpClient.DefaultRequestHeaders.Add(HeaderNames.Authorization, $"Bearer {token}");
+                // use admin jwt token
+                string token = GenerateAdminJwtToken();
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
             }
             
-            HttpResponseMessage response = await HttpClient.GetAsync(uri);
+            HttpResponseMessage response = await HttpClient.SendAsync(request);
             response.EnsureSuccessStatusCode();
             return await response.Content.ReadAsAsync<HostStatus>();
+        }
+
+        public string GenerateAdminJwtToken()
+        {
+            var tokenHandler = new JwtSecurityTokenHandler();
+            string defaultKey = Util.GetDefaultKeyValue();
+            var key = Encoding.ASCII.GetBytes(defaultKey);
+            var tokenDescriptor = new SecurityTokenDescriptor
+            {
+                Audience = string.Format(ScriptConstants.AdminJwtValidAudienceFormat, Environment.GetEnvironmentVariable(EnvironmentSettingNames.AzureWebsiteName)),
+                Issuer = string.Format(ScriptConstants.AdminJwtValidIssuerFormat, Environment.GetEnvironmentVariable(EnvironmentSettingNames.AzureWebsiteName)),
+                Expires = DateTime.UtcNow.AddHours(1),
+                SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+            };
+            var token = tokenHandler.CreateToken(tokenDescriptor);
+            string tokenHeaderValue = tokenHandler.WriteToken(token);
+
+            return tokenHeaderValue;
         }
 
         public void Dispose()

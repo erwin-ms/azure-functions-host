@@ -16,10 +16,13 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
 
         public static IConfigurationBuilder AddTestSettings(this IConfigurationBuilder builder) => builder.AddJsonFile(configPath, true);
 
-        // appsettings.tests.json settings can be overwritten by a later IConfigurationSource IF the overriding setting value is not null or empty.
-        // If the overriding setting value is null or empty, IConfigurationBuilder will use the value from the previous source.
-        // For integration tests that require a null value setting override (ex. no AzureWebJobsStorage setting), call this method from
-        // TestFunctionHost's Action<IConfigurationBuilder> parameters (WebHost AND ScriptHost levels.)
+        // appsettings.tests.json settings can be overwritten by a later
+        // IConfigurationSource IF the overriding setting value is not null or empty.
+        // If the overriding setting value is null or empty, IConfigurationBuilder
+        // will use the value from the previous source. For integration tests that
+        // require a null value setting override (ex. no AzureWebJobsStorage setting),
+        // call this method from TestFunctionHost's Action<IConfigurationBuilder>
+        // parameters (WebHost AND ScriptHost levels.)
         public static IConfigurationBuilder RemoveTestSettings(this IConfigurationBuilder builder)
         {
             var testConfigSource = builder.Sources.FirstOrDefault(s => (s as JsonConfigurationSource)?.Path == ConfigFile);
